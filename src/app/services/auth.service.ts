@@ -1,7 +1,9 @@
 import { HttpClient } from '@angular/common/http';
 import { Injectable, computed, inject, signal } from '@angular/core';
 import { Router } from '@angular/router';
-import { Observable, map, tap, throwError } from 'rxjs';
+//================================
+import { Observable, catchError, map, tap, throwError } from 'rxjs';
+//================================
 
 import { environment } from '../../environments/environment';
 import {
@@ -13,31 +15,37 @@ import {
   User,
 } from '../models';
 
-// Nombres con los que guardo la sesión en localStorage
-const TOKEN_KEY = 'token';
-const REFRESH_TOKEN_KEY = 'refreshToken';
-const USER_KEY = 'user';
+//================================
+interface JwtPayload {
+  id?: string;
+  _id?: string;
+  name: string;
+  email: string;
+  role: 'user' | 'admin';
+}
 
-// Por qué localStorage y no una cookie HttpOnly (está explicado con más detalle en el README):
-// la API devuelve los tokens en el JSON del login, así que el frontend tiene que guardarlos él.
-// localStorage sobrevive a recargar la página y es fácil de entender. Su riesgo es que cualquier
-// script que se ejecute en la página puede leerlo (un ataque XSS). Una cookie HttpOnly no se puede
-// leer desde JavaScript, pero obliga a cambiar el backend y a protegerse de otro ataque (CSRF).
-
-// Al arrancar la app, recupero el usuario que dejó guardado el último login
-function readStoredUser(): User | null {
-  const stored = localStorage.getItem(USER_KEY);
-  if (!stored) {
-    return null;
-  }
-
+function parseJwtUser(token: string): User | null {
   try {
-    return JSON.parse(stored) as User;
+    const base64Url = token.split('.')[1];
+    const base64 = base64Url.replace(/-/g, '+').replace(/_/g, '/');
+    const jsonPayload = decodeURIComponent(
+      atob(base64)
+        .split('')
+        .map((c) => '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2))
+        .join('')
+    );
+    const payload = JSON.parse(jsonPayload) as JwtPayload;
+    return {
+      _id: payload.id || payload._id || '',
+      name: payload.name,
+      email: payload.email,
+      role: payload.role,
+    };
   } catch {
-    // Si alguien ha tocado el valor a mano y no es JSON, es como no tener sesión
     return null;
   }
 }
+//================================
 
 @Injectable({ providedIn: 'root' })
 export class AuthService {
@@ -47,7 +55,10 @@ export class AuthService {
 
   // El usuario con sesión, o null si no hay sesión. Es privado y modificable aquí dentro;
   // fuera solo se puede leer (asReadonly), así nadie cambia la sesión sin pasar por este servicio
-  private currentUser = signal<User | null>(readStoredUser());
+//================================
+  private accessToken = signal<string | null>(null);
+  private currentUser = signal<User | null>(null);
+//================================
   readonly user = this.currentUser.asReadonly();
 
   // computed: se recalculan solos cada vez que cambia el usuario
@@ -61,43 +72,61 @@ export class AuthService {
 
   /** POST /auth/login. Si va bien, guarda los dos tokens y el usuario */
   login(credentials: LoginRequest): Observable<LoginResponse> {
-    return this.http.post<LoginResponse>(`${this.baseUrl}/login`, credentials).pipe(
+//================================
+    return this.http.post<LoginResponse>(`${this.baseUrl}/login`, credentials, { withCredentials: true }).pipe(
       // tap: hago algo con la respuesta sin cambiarla; el componente la sigue recibiendo igual
       tap((response) => {
-        localStorage.setItem(TOKEN_KEY, response.token);
-        localStorage.setItem(REFRESH_TOKEN_KEY, response.refreshToken);
-        localStorage.setItem(USER_KEY, JSON.stringify(response.user));
+        this.accessToken.set(response.token);
         this.currentUser.set(response.user);
       }),
     );
+//================================
   }
 
   /** POST /auth/refresh. Pide un access token nuevo con el refresh token y lo guarda */
   refresh(): Observable<string> {
-    const refreshToken = localStorage.getItem(REFRESH_TOKEN_KEY);
-    if (!refreshToken) {
-      return throwError(() => new Error('No hay refresh token'));
-    }
-
-    return this.http.post<RefreshResponse>(`${this.baseUrl}/refresh`, { refreshToken }).pipe(
-      tap((response) => localStorage.setItem(TOKEN_KEY, response.token)),
+//================================
+    return this.http.post<RefreshResponse>(`${this.baseUrl}/refresh`, {}, { withCredentials: true }).pipe(
+      tap((response) => {
+        this.accessToken.set(response.token);
+        if (!this.currentUser()) {
+          const user = parseJwtUser(response.token);
+          if (user) {
+            this.currentUser.set(user);
+          }
+        }
+      }),
       // map: de la respuesta { token } me quedo solo con el texto del token
       map((response) => response.token),
+      catchError((error) => {
+        this.accessToken.set(null);
+        this.currentUser.set(null);
+        return throwError(() => error);
+      })
     );
+//================================
   }
 
   /** Cierra la sesión: borra lo guardado y lleva al login */
   logout(): void {
-    // Los tokens no se guardan en el servidor, así que cerrar sesión es olvidarlos aquí
-    localStorage.removeItem(TOKEN_KEY);
-    localStorage.removeItem(REFRESH_TOKEN_KEY);
-    localStorage.removeItem(USER_KEY);
+//================================
+    this.http.post(`${this.baseUrl}/logout`, {}, { withCredentials: true }).subscribe({
+      next: () => this.finalizeLogout(),
+      error: () => this.finalizeLogout(),
+    });
+  }
+
+  private finalizeLogout(): void {
+    this.accessToken.set(null);
     this.currentUser.set(null);
     this.router.navigate(['/login']);
   }
+//================================
 
   /** El access token guardado, o null si no hay sesión. Lo usa el interceptor */
   getToken(): string | null {
-    return localStorage.getItem(TOKEN_KEY);
+//================================
+    return this.accessToken();
+//================================
   }
 }
