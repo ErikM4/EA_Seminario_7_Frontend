@@ -17,6 +17,14 @@
     </nav>
   }
 
+<!--================================-->
+  @if (notificationMessage(); as msg) {
+    <div class="presence-toast">
+      {{ msg }}
+    </div>
+  }
+<!--================================-->
+
   <div class="session">
     @if (auth.user(); as user) {
       <span class="user">{{ user.name }} ({{ user.role }})</span>
